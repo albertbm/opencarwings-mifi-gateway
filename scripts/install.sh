@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install the gateway onto a rooted Balong MiFi and set it to start on boot.
+# Install ocwgw onto a rooted Balong MiFi and set it to start on boot.
 # Run this from a machine that has adb and can reach the modem.
 #
 #   scripts/install.sh              # download the latest release binary
@@ -26,7 +26,7 @@ fi
 
 $ADB connect "$DEV" >/dev/null 2>&1 || true
 
-echo "pushing gateway to /online/ocwgw"
+echo "pushing ocwgw to /online/ocwgw"
 $ADB push "$BIN" /online/ocwgw >/dev/null
 $ADB shell "chmod 755 /online/ocwgw"
 
@@ -34,13 +34,13 @@ $ADB shell "chmod 755 /online/ocwgw"
 tmp="$(mktemp)"
 cat > "$tmp" <<'SNIP'
 
-# opencarwings gateway
+# ocwgw
 [ -x /online/ocwgw ] && ( sleep 20; /online/ocwgw > /online/ocwgw.log 2>&1 ) &
 SNIP
 $ADB push "$tmp" /online/ocwgw-autorun.snip >/dev/null
 rm -f "$tmp"
 
-echo "adding gateway to /system/etc/autorun.sh (if not already there)"
+echo "adding ocwgw to /system/etc/autorun.sh (if not already there)"
 $ADB shell 'grep -q ocwgw /system/etc/autorun.sh 2>/dev/null && echo "already set up" || { mount -o remount,rw /system; cat /online/ocwgw-autorun.snip >> /system/etc/autorun.sh; mount -o remount,ro /system; echo "added to autorun"; }'
 
 echo
