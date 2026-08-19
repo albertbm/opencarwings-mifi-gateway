@@ -1,0 +1,10 @@
+# build output
+/ocwgw-arm
+/ocwgw
+/dist/
+/t
+*.exe
+*.o
+
+# macOS
+.DS_Store
