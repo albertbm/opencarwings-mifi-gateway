@@ -25,19 +25,19 @@ On the E5577 this says `ELF 32-bit ARM, EABI5, statically linked`, which is `GOA
 ARMv7 (the E5577 and most Balong MiFis of that era):
 
 ```
-GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -ldflags "-s -w" -o ocwgw-arm .
+GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -ldflags "-s -w" -o ocwgw-arm ./cmd/ocwgw
 ```
 
 For another CPU, change `GOARCH` (and `GOARM`):
 
 ```
-GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags "-s -w" -o ocwgw-arm .        # 64-bit ARM
-GOOS=linux GOARCH=arm GOARM=5 CGO_ENABLED=0 go build -ldflags "-s -w" -o ocwgw-arm .   # older ARMv5
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags "-s -w" -o ocwgw-arm ./cmd/ocwgw        # 64-bit ARM
+GOOS=linux GOARCH=arm GOARM=5 CGO_ENABLED=0 go build -ldflags "-s -w" -o ocwgw-arm ./cmd/ocwgw   # older ARMv5
 ```
 
 The binary is static, so it runs on the modem's bionic userland with no shared libraries.
-To refresh the embedded CA bundle, copy your system's over `ca-certificates.crt`, for
-example from `/etc/ssl/certs/ca-certificates.crt`.
+To refresh the embedded CA bundle, copy your system's over `cmd/ocwgw/ca-certificates.crt`,
+for example from `/etc/ssl/certs/ca-certificates.crt`.
 
 ## Environment overrides
 
