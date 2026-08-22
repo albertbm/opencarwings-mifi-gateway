@@ -47,6 +47,10 @@ const (
 	defaultConfPath = "/online/ocw_gw.conf"                        // OCW_CONF
 	cmdTOms         = 5000
 	cmgsTOms        = 20000
+	drainQuietMs    = 120  // channel counts as settled after this long with no new bytes
+	drainMaxMs      = 500  // but never wait longer than this before sending anyway
+	abortQuietMs    = 500  // after a failed send, wait longer for a late reply to land
+	abortMaxMs      = 3000 // before resyncing and retrying
 )
 
 func env(key, def string) string {
@@ -461,25 +465,75 @@ func (m *modem) write(s string) error {
 	return err
 }
 
+// drain waits for the AT channel to fall quiet, then returns a mark past
+// everything buffered so far. Without it a late reply to an earlier command
+// lands inside the next command's window and is read as that command's answer:
+// when a send's +CMS ERROR arrives after its own read already timed out, the
+// retry's AT+CMGF=0 picks it up and the failure gets blamed on AT+CMGF=0.
+func (m *modem) drain(quietMs, maxMs int) int {
+	deadline := time.Now().Add(time.Duration(maxMs) * time.Millisecond)
+	quiet := time.Duration(quietMs) * time.Millisecond
+	last, settled := m.mark(), time.Now()
+	for time.Now().Before(deadline) {
+		time.Sleep(25 * time.Millisecond)
+		if n := m.mark(); n != last {
+			last, settled = n, time.Now()
+			continue
+		}
+		if time.Since(settled) >= quiet {
+			break
+		}
+	}
+	return m.mark()
+}
+
+// stripUnsolicited drops the modem's own notifications (^DSFLOWRPT data
+// counters, ^RSSI, ^HCSQ, ^HFREQINFO and the rest). The radio emits them
+// whenever it likes, including in the middle of a response, and every command
+// this gateway sends is a plain AT or +CMD, so nothing it waits for starts
+// with ^.
+func stripUnsolicited(s string) string {
+	if !strings.Contains(s, "^") {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	keep := lines[:0]
+	for _, ln := range lines {
+		if strings.HasPrefix(strings.TrimSpace(ln), "^") {
+			continue
+		}
+		keep = append(keep, ln)
+	}
+	return strings.Join(keep, "\n")
+}
+
 func (m *modem) readUntil(mark int, pred func(string) bool, timeoutMs int) (string, error) {
 	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
 	for time.Now().Before(deadline) {
-		s := m.since(mark)
+		s := stripUnsolicited(m.since(mark))
 		if pred(s) {
 			return s, nil
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return m.since(mark), fmt.Errorf("timeout waiting for modem response")
+	return stripUnsolicited(m.since(mark)), fmt.Errorf("timeout waiting for modem response")
 }
 
+// hasTerminator ends the wait for a plain command (AT, AT+CMGF). +CMS ERROR is
+// deliberately not a terminator here. It belongs to a message command, and a
+// send's error can arrive long after that send's own read gave up — landing in
+// the middle of the retry's AT+CMGF=0 window, where it used to be read as the
+// answer and logged as "modem rejected AT+CMGF=0" for a command the modem had
+// in fact accepted. Ignoring it lets the real OK arrive. If a modem ever does
+// answer one of these with +CMS ERROR the wait times out instead, and the text
+// is still in the returned window for the log.
 func hasTerminator(b string) bool {
 	return strings.Contains(b, "\r\nOK\r\n") || strings.Contains(b, "\r\nERROR\r\n") ||
-		strings.Contains(b, "+CMS ERROR") || strings.Contains(b, "+CME ERROR")
+		strings.Contains(b, "+CME ERROR")
 }
 
 func (m *modem) sendCommand(cmd string, timeoutMs int) (string, error) {
-	mk := m.mark()
+	mk := m.drain(drainQuietMs, drainMaxMs)
 	if err := m.write(cmd + "\r"); err != nil {
 		return "", err
 	}
@@ -527,6 +581,9 @@ const sendAttempts = 2
 // retries. Best effort, errors are ignored on purpose.
 func (m *modem) abortPrompt() {
 	m.write("\x1b")
+	// Give the failed send's reply time to turn up and be skipped here, rather
+	// than in the middle of the retry's first command.
+	m.drain(abortQuietMs, abortMaxMs)
 	m.sendCommand("AT", cmdTOms)
 }
 
@@ -564,7 +621,7 @@ func (m *modem) sendPduOnce(pduHex string, tpduLength *int) (string, error) {
 	if _, err := m.sendCommand("AT+CMGF=0", cmdTOms); err != nil {
 		return "", err
 	}
-	mk := m.mark()
+	mk := m.drain(drainQuietMs, drainMaxMs)
 	if err := m.write("AT+CMGS=" + strconv.Itoa(length) + "\r"); err != nil {
 		return "", err
 	}
@@ -572,7 +629,7 @@ func (m *modem) sendPduOnce(pduHex string, tpduLength *int) (string, error) {
 	if err != nil || !strings.Contains(pb, ">") {
 		return pb, fmt.Errorf("no '>' prompt for AT+CMGS: %s", strings.TrimSpace(pb))
 	}
-	mk = m.mark()
+	mk = m.drain(drainQuietMs, drainMaxMs)
 	if err := m.write(clean + "\x1a"); err != nil {
 		return "", err
 	}
@@ -607,7 +664,7 @@ func (m *modem) sendTextOnce(phone, text string) (string, error) {
 	if _, err := m.sendCommand("AT+CMGF=1", cmdTOms); err != nil {
 		return "", err
 	}
-	mk := m.mark()
+	mk := m.drain(drainQuietMs, drainMaxMs)
 	if err := m.write("AT+CMGS=\"" + phone + "\"\r"); err != nil {
 		return "", err
 	}
@@ -615,7 +672,7 @@ func (m *modem) sendTextOnce(phone, text string) (string, error) {
 	if err != nil || !strings.Contains(pb, ">") {
 		return pb, fmt.Errorf("no '>' prompt: %s", strings.TrimSpace(pb))
 	}
-	mk = m.mark()
+	mk = m.drain(drainQuietMs, drainMaxMs)
 	if err := m.write(text + "\x1a"); err != nil {
 		return "", err
 	}
