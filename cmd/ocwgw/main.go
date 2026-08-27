@@ -38,6 +38,23 @@ import (
 //go:embed ca-certificates.crt
 var caPEM []byte
 
+// The modem has no certificate store, so the embedded bundle is the only root
+// pool. Both the websocket dial and the heartbeat push verify against it.
+var (
+	poolOnce sync.Once
+	poolVal  *x509.CertPool
+)
+
+func rootPool() *x509.CertPool {
+	poolOnce.Do(func() {
+		poolVal = x509.NewCertPool()
+		if !poolVal.AppendCertsFromPEM(caPEM) {
+			log.Printf("warning: embedded CA bundle failed to load")
+		}
+	})
+	return poolVal
+}
+
 // Defaults; each is overridable by the matching environment variable so the same
 // binary works against a self-hosted server or a different modem's AT device.
 const (
@@ -63,10 +80,12 @@ func env(key, def string) string {
 // ---- runtime config (server url + enable flag), editable from the web page ----
 
 type config struct {
-	mu      sync.Mutex
-	wsURL   string
-	enabled bool
-	path    string
+	mu        sync.Mutex
+	wsURL     string
+	enabled   bool
+	beatURL   string
+	beatEvery time.Duration
+	path      string
 }
 
 var cfg = &config{}
@@ -107,14 +126,28 @@ func (c *config) get() (string, bool) {
 	return c.wsURL, c.enabled
 }
 
+func (c *config) getBeat() (string, time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.beatURL, c.beatEvery
+}
+
+func (c *config) setBeat(u string, every time.Duration) {
+	c.mu.Lock()
+	c.beatURL, c.beatEvery = u, every
+	c.mu.Unlock()
+}
+
 func (c *config) load() {
 	b, err := os.ReadFile(c.path)
 	if err != nil {
 		return
 	}
 	var v struct {
-		WSURL   string `json:"ws_url"`
-		Enabled *bool  `json:"enabled"`
+		WSURL    string  `json:"ws_url"`
+		Enabled  *bool   `json:"enabled"`
+		BeatURL  *string `json:"beat_url"`
+		BeatEvry string  `json:"beat_interval"`
 	}
 	if json.Unmarshal(b, &v) != nil {
 		return
@@ -126,12 +159,23 @@ func (c *config) load() {
 	if v.Enabled != nil {
 		c.enabled = *v.Enabled
 	}
+	if v.BeatURL != nil {
+		c.beatURL = *v.BeatURL
+	}
+	if v.BeatEvry != "" {
+		c.beatEvery = parseBeatEvery(v.BeatEvry)
+	}
 	c.mu.Unlock()
 }
 
 func (c *config) save() {
 	c.mu.Lock()
-	v := map[string]any{"ws_url": c.wsURL, "enabled": c.enabled}
+	v := map[string]any{
+		"ws_url":        c.wsURL,
+		"enabled":       c.enabled,
+		"beat_url":      c.beatURL,
+		"beat_interval": c.beatEvery.String(),
+	}
 	p := c.path
 	c.mu.Unlock()
 	b, _ := json.MarshalIndent(v, "", "  ")
@@ -179,22 +223,27 @@ func installAutostart() error {
 // ---- live status + built-in status web page ----
 
 type gwStatus struct {
-	mu        sync.Mutex
-	deviceID  string
-	keyHex    string
-	wsState   string
-	atOK      bool
-	started   time.Time
-	sentOK    int
-	sentErr   int
-	lastEvent string
-	lastSent  string
+	mu         sync.Mutex
+	deviceID   string
+	keyHex     string
+	wsState    string
+	atOK       bool
+	started    time.Time
+	sentOK     int
+	sentErr    int
+	lastEvent  string
+	lastSent   string
+	lastSentAt time.Time
+	wsConns    []time.Time // successful websocket connects, for the reconnect count
+	beatOK     bool
+	beatLast   string
+	beatAt     time.Time
 }
 
 var st = &gwStatus{started: time.Now(), wsState: "starting"}
 
-func (s *gwStatus) setWS(v string)  { s.mu.Lock(); s.wsState = v; s.mu.Unlock() }
-func (s *gwStatus) event(v string)  { s.mu.Lock(); s.lastEvent = v; s.mu.Unlock() }
+func (s *gwStatus) setWS(v string) { s.mu.Lock(); s.wsState = v; s.mu.Unlock() }
+func (s *gwStatus) event(v string) { s.mu.Lock(); s.lastEvent = v; s.mu.Unlock() }
 func (s *gwStatus) sent(ok bool, v string) {
 	s.mu.Lock()
 	if ok {
@@ -203,6 +252,24 @@ func (s *gwStatus) sent(ok bool, v string) {
 		s.sentErr++
 	}
 	s.lastSent = v
+	s.lastSentAt = time.Now()
+	s.mu.Unlock()
+}
+
+// wsConnected records a successful connect. The count over the last hour is what
+// the heartbeat graphs: flat at zero when healthy, a staircase when flapping.
+func (s *gwStatus) wsConnected() {
+	s.mu.Lock()
+	s.wsConns = append(s.wsConns, time.Now())
+	if len(s.wsConns) > 64 {
+		s.wsConns = append([]time.Time(nil), s.wsConns[len(s.wsConns)-64:]...)
+	}
+	s.mu.Unlock()
+}
+
+func (s *gwStatus) beat(ok bool, v string) {
+	s.mu.Lock()
+	s.beatOK, s.beatLast, s.beatAt = ok, v, time.Now()
 	s.mu.Unlock()
 }
 
@@ -241,10 +308,13 @@ input{padding:4px 6px;font-size:.95rem}button{padding:4px 12px;font-size:.95rem;
 <span class="k">Sent ok / errors</span> %d / %d<br>
 <span class="k">Last event</span> %s<br>
 <span class="k">Last send</span> <code>%s</code><br>
-<span class="k">Uptime</span> %s</div>
+<span class="k">Uptime</span> %s<br>
+<span class="k">Heartbeat</span> %s</div>
 <div class="box">
 <form method="post" action="/config">
-<span class="k">Server URL</span> <input name="ws_url" value="%s" style="width:58%%"> <button>Save</button>
+<span class="k">Server URL</span> <input name="ws_url" value="%s" style="width:58%%"><br>
+<span class="k">Heartbeat URL</span> <input name="beat_url" value="%s" style="width:58%%" placeholder="empty = off"><br>
+<span class="k">Heartbeat every</span> <input name="beat_interval" value="%s" style="width:70px"> <button>Save</button>
 </form>
 <form method="post" action="/toggle" style="margin-top:10px">
 <span class="k">Gateway</span> <b>%s</b> &nbsp; <button>%s</button>
@@ -256,12 +326,21 @@ input{padding:4px 6px;font-size:.95rem}button{padding:4px 12px;font-size:.95rem;
 func startHTTP(addr string) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status.json", func(w http.ResponseWriter, r *http.Request) {
+		beatURL, _ := cfg.getBeat()
 		st.mu.Lock()
+		beatAge := -1
+		if !st.beatAt.IsZero() {
+			beatAge = int(time.Since(st.beatAt).Seconds())
+		}
 		v := map[string]any{
 			"device_id": st.deviceID, "encryption_key": st.keyHex, "ws_state": st.wsState,
 			"at_ok": st.atOK, "sent_ok": st.sentOK, "sent_err": st.sentErr,
 			"last_event": st.lastEvent, "last_send": st.lastSent,
-			"uptime_sec": int(time.Since(st.started).Seconds()),
+			"uptime_sec":        int(time.Since(st.started).Seconds()),
+			"device_uptime_sec": int(deviceUptime().Seconds()),
+			"ws_reconnects_1h":  st.reconnectsLocked(time.Hour),
+			"beat_url":          beatURL, "beat_ok": st.beatOK, "beat_last": st.beatLast,
+			"beat_age_sec": beatAge,
 		}
 		st.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
@@ -269,6 +348,7 @@ func startHTTP(addr string) {
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		wsURL, enabled := cfg.get()
+		beatURL, beatEvery := cfg.getBeat()
 		enabledTxt, toggleLabel := "disabled", "Enable"
 		if enabled {
 			enabledTxt, toggleLabel = "enabled", "Disable"
@@ -279,18 +359,30 @@ func startHTTP(addr string) {
 				`<form method="post" action="/install-autostart" style="display:inline;margin:0"><button>Install</button></form>`
 		}
 		st.mu.Lock()
-		connected := strings.Contains(st.wsState, "connected")
+		connected := st.wsState == "connected"
 		atTxt := "not responding"
 		if st.atOK {
 			atTxt = "OK"
+		}
+		beatTxt := "off"
+		if beatURL != "" {
+			switch {
+			case st.beatAt.IsZero():
+				beatTxt = "no beat sent yet"
+			case st.beatOK:
+				beatTxt = "sent " + fmtAge(st.beatAt)
+			default:
+				beatTxt = `<span class="bad">failed</span> ` + html.EscapeString(st.beatLast)
+			}
 		}
 		body := fmt.Sprintf(pageHTML,
 			html.EscapeString(st.deviceID), html.EscapeString(st.keyHex),
 			cls(connected), html.EscapeString(st.wsState),
 			cls(st.atOK), atTxt, st.sentOK, st.sentErr,
 			html.EscapeString(or(st.lastEvent, "none")), html.EscapeString(or(st.lastSent, "none")),
-			time.Since(st.started).Truncate(time.Second).String(),
-			html.EscapeString(wsURL), enabledTxt, toggleLabel, autostart)
+			time.Since(st.started).Truncate(time.Second).String(), beatTxt,
+			html.EscapeString(wsURL), html.EscapeString(beatURL), beatEvery.String(),
+			enabledTxt, toggleLabel, autostart)
 		st.mu.Unlock()
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, body)
@@ -306,14 +398,24 @@ func startHTTP(addr string) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 	})
 	mux.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost {
-			u := strings.TrimSpace(r.FormValue("ws_url"))
-			if u != "" {
+		if r.Method == http.MethodPost && r.ParseForm() == nil {
+			reconnect := false
+			if u := strings.TrimSpace(r.PostFormValue("ws_url")); u != "" {
 				cfg.mu.Lock()
 				cfg.wsURL = u
 				cfg.mu.Unlock()
-				cfg.save()
 				log.Printf("[cfg] server url set to %s", u)
+				reconnect = true
+			}
+			// Absent means some other form posted here; empty means switch it off.
+			if _, ok := r.PostForm["beat_url"]; ok {
+				b := strings.TrimSpace(r.PostFormValue("beat_url"))
+				cfg.setBeat(b, parseBeatEvery(r.PostFormValue("beat_interval")))
+				log.Printf("[cfg] heartbeat url set to %q", b)
+				signalBeatWake()
+			}
+			cfg.save()
+			if reconnect {
 				closeActive()
 				signalWake()
 			}
@@ -402,11 +504,11 @@ func decrypt(data, key []byte) ([]byte, error) {
 // ---- modem over /dev/appvcom ----
 
 type modem struct {
-	rfd  int // raw read fd. Go's os.File poller won't read this char device, so we use syscalls
-	wfd  int // raw write fd
-	cmd  sync.Mutex // serialize command/response
-	mu   sync.Mutex
-	buf  []byte
+	rfd int        // raw read fd. Go's os.File poller won't read this char device, so we use syscalls
+	wfd int        // raw write fd
+	cmd sync.Mutex // serialize command/response
+	mu  sync.Mutex
+	buf []byte
 }
 
 func openModem(dev string) (*modem, error) {
@@ -748,6 +850,8 @@ func main() {
 	idPath := env("OCW_IDS", defaultIDsPath)
 	appvcomDev := env("OCW_APPVCOM", defaultAppvcom)
 	wsURL := env("OCW_WS_URL", defaultWSURL)
+	beatURL := env("OCW_BEAT_URL", "")
+	beatEvery := parseBeatEvery(env("OCW_BEAT_INTERVAL", defaultBeatEvery.String()))
 	deviceID, key, err := loadOrCreateIDs(idPath)
 	if err != nil {
 		log.Fatalf("ids: %v", err)
@@ -769,9 +873,15 @@ func main() {
 	cfg.path = env("OCW_CONF", defaultConfPath)
 	cfg.wsURL = wsURL
 	cfg.enabled = true
+	cfg.beatURL = beatURL
+	cfg.beatEvery = beatEvery
 	cfg.load()
 
 	startHTTP(env("OCW_HTTP_ADDR", ":8080"))
+
+	// Independent of the modem and the websocket on purpose: it reports on them,
+	// so it has to keep running when they are broken.
+	go beatLoop()
 
 	// Wait for the modem AT device. On a cold boot it may not be there yet, so we
 	// keep trying instead of giving up. The web page is already serving by now.
@@ -807,13 +917,9 @@ func main() {
 		}
 	}()
 
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(caPEM) {
-		log.Printf("warning: embedded CA bundle failed to load")
-	}
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 15 * time.Second,
-		TLSClientConfig:  &tls.Config{RootCAs: pool}, // verify against embedded CAs
+		TLSClientConfig:  &tls.Config{RootCAs: rootPool()}, // verify against embedded CAs
 	}
 
 	waitOrWake := func(d time.Duration) {
@@ -866,6 +972,7 @@ func main() {
 		delay = 2 * time.Second
 		setActive(c)
 		st.setWS("connected")
+		st.wsConnected()
 		log.Printf("[ws] socket open")
 		c.SetPongHandler(func(string) error { return nil })
 		done := make(chan struct{})

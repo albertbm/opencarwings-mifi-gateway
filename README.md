@@ -102,6 +102,14 @@ Either way it adds a line to `/system/etc/autorun.sh` (a persistent partition) t
 `ocwgw` a few seconds into boot. `ocwgw` waits for the AT device to appear, so a cold start
 is fine. To undo it, delete that line from `autorun.sh`.
 
+## Knowing when it stops
+
+The server cannot tell you the gateway has gone away, so `ocwgw` pushes a short status line
+out to a monitor on a timer and lets that shout at you when the pushes stop. Set a Heartbeat
+URL on the web page, point it at an Uptime Kuma push monitor, and get a Telegram message when
+it goes quiet. Off unless you set a URL. How it works and how to set it up is in
+[docs/heartbeat.md](docs/heartbeat.md).
+
 ## How it talks to the server
 
 Ported from the opencarwings-sms Java client:

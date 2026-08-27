@@ -52,6 +52,8 @@ from a script.
 | `OCW_IDS`       | `/online/ocw_gw.ids`                         | where identity is stored                  |
 | `OCW_CONF`      | `/online/ocw_gw.conf`                        | where url and enable flag live            |
 | `OCW_HTTP_ADDR` | `:8080`                                      | status page listen address                |
+| `OCW_BEAT_URL`  | empty, heartbeat off                         | where to push the heartbeat, see [heartbeat.md](heartbeat.md) |
+| `OCW_BEAT_INTERVAL` | `5m`                                     | how often, minimum `1m`                   |
 
 ## Implementation notes
 
