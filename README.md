@@ -56,8 +56,15 @@ By hand instead:
 curl -fSLO https://github.com/albertbm/opencarwings-mifi-gateway/releases/latest/download/ocwgw-arm
 adb push ocwgw-arm /online/ocwgw
 adb shell chmod 755 /online/ocwgw
-adb shell /online/ocwgw
+adb shell "trap '' HUP; /online/ocwgw < /dev/null > /online/ocwgw.log 2>&1 &"
 ```
+
+That last line is not just `adb shell /online/ocwgw`. Two things would go wrong. adb
+sends SIGHUP to the process group when the session ends, and this busybox has no
+`setsid` and no `nohup`, so the gateway would die with the shell; ignoring HUP first
+survives the exec. And a child still holding the pty's stdin hangs the adb session,
+because this adbd has no `shell_v2` and the old transport waits for pty EOF, so stdin
+goes to `/dev/null`. `scripts/start-ocwgw.sh` is the same thing as a file.
 
 ## Register it
 
