@@ -42,7 +42,8 @@ scripts/install.sh
 That downloads the latest `ocwgw-arm` (ARMv7) from the
 [releases](https://github.com/albertbm/opencarwings-mifi-gateway/releases), pushes it to
 `/online/ocwgw`, makes it executable, and adds it to the modem's boot script so it starts
-on its own.
+on its own. It also pushes `start-ocwgw.sh` to `/online/start-ocwgw.sh`, which is how you
+start the gateway by hand without it dying when the adb session ends.
 
 Built it yourself, or already have the binary? Point the script at it:
 
@@ -105,9 +106,10 @@ Two ways to make it start on boot:
 * Or run `scripts/install.sh`, which does the same from your host while it installs the
   binary.
 
-Either way it adds a line to `/system/etc/autorun.sh` (a persistent partition) that starts
-`ocwgw` a few seconds into boot. `ocwgw` waits for the AT device to appear, so a cold start
-is fine. To undo it, delete that line from `autorun.sh`.
+Either way it adds the same line to `/system/etc/autorun.sh` (a persistent partition),
+marked `# opencarwings gateway`, that starts `ocwgw` a few seconds into boot. `ocwgw`
+waits for the AT device to appear, so a cold start is fine. To undo it, delete that line
+from `autorun.sh`.
 
 ## Knowing when it stops
 
