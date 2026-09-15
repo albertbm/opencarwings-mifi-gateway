@@ -7,7 +7,7 @@ CPU, or would rather not trust a prebuilt binary.
 
 ## What you need
 
-* Go 1.21 or newer, on any machine. It cross compiles, so you do not build on the modem.
+* Go 1.24.4 or newer, on any machine. It cross compiles, so you do not build on the modem.
 * Nothing else. The binary is static (`CGO_ENABLED=0`).
 
 ## Find your modem's CPU
