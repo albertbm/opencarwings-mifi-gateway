@@ -89,13 +89,16 @@ http://192.168.8.1:8080/
 <img src="assets/status-page.png" alt="ocwgw status page" width="480">
 
 It shows the values to register, the websocket state, whether the modem AT channel is
-answering, a count of messages sent, and the last activity. Two things you can change
-there:
+answering, the sent and error counts, the last event and last send, uptime, and when the
+heartbeat last went out. Four things you can change there:
 
 * the Server URL, handy for pointing at your own server
+* the Heartbeat URL, and how often it fires
 * whether `ocwgw` is enabled
+* whether autostart is installed, if it is not already
 
-Both are saved and take effect right away. There is a `/status.json` endpoint too.
+The first three are saved and take effect right away. There is a `/status.json` endpoint
+too.
 
 ## Autostart
 
