@@ -189,11 +189,18 @@ func (c *config) save() {
 const (
 	autorunPath   = "/system/etc/autorun.sh"
 	autorunMarker = "# opencarwings gateway"
+	// Installs made before the marker was aligned with scripts/install.sh wrote
+	// "# ocwgw". Still recognised, or the page would offer to install over one.
+	autorunMarkerOld = "# ocwgw"
 )
 
 func autostartInstalled() bool {
 	b, err := os.ReadFile(autorunPath)
-	return err == nil && strings.Contains(string(b), autorunMarker)
+	if err != nil {
+		return false
+	}
+	text := string(b)
+	return strings.Contains(text, autorunMarker) || strings.Contains(text, autorunMarkerOld)
 }
 
 // installAutostart appends a launch line to the modem boot script. /system is a
