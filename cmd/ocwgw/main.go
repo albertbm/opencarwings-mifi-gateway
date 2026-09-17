@@ -309,6 +309,9 @@ input{padding:4px 6px;font-size:.95rem}button{padding:4px 12px;font-size:.95rem;
 <div class="box reg"><b>Register these on your opencarwings provider:</b><br>
 <span class="k">device_id</span> <code>%s</code><br>
 <span class="k">encryption_key</span> <code>%s</code></div>
+<div class="box" style="text-align:center">
+<img src="/screen.png?t=%d" width="256" alt="the modem's panel"
+ style="image-rendering:pixelated;background:#000;border-radius:6px"></div>
 <div class="box">
 <span class="k">WebSocket</span> <span class="%s">%s</span><br>
 <span class="k">Modem AT</span> <span class="%s">%s</span><br>
@@ -384,6 +387,7 @@ func startHTTP(addr string) {
 		}
 		body := fmt.Sprintf(pageHTML,
 			html.EscapeString(st.deviceID), html.EscapeString(st.keyHex),
+			time.Now().Unix(), // the panel shot is never cached
 			cls(connected), html.EscapeString(st.wsState),
 			cls(st.atOK), atTxt, st.sentOK, st.sentErr,
 			html.EscapeString(or(st.lastEvent, "none")), html.EscapeString(or(st.lastSent, "none")),
@@ -394,6 +398,7 @@ func startHTTP(addr string) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, body)
 	})
+	mux.HandleFunc("/screen.png", servePNG)
 	mux.HandleFunc("/install-autostart", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			if err := installAutostart(); err != nil {
@@ -431,14 +436,7 @@ func startHTTP(addr string) {
 	})
 	mux.HandleFunc("/toggle", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
-			cfg.mu.Lock()
-			cfg.enabled = !cfg.enabled
-			now := cfg.enabled
-			cfg.mu.Unlock()
-			cfg.save()
-			log.Printf("[cfg] gateway %s", map[bool]string{true: "enabled", false: "disabled"}[now])
-			closeActive()
-			signalWake()
+			toggleGateway("page")
 		}
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 	})
@@ -448,6 +446,20 @@ func startHTTP(addr string) {
 		}
 	}()
 	log.Printf("[http] status page on %s", addr)
+}
+
+// toggleGateway flips the enable switch from wherever it was asked for, the
+// status page or the modem's own menu button, and returns the new state.
+func toggleGateway(from string) bool {
+	cfg.mu.Lock()
+	cfg.enabled = !cfg.enabled
+	now := cfg.enabled
+	cfg.mu.Unlock()
+	cfg.save()
+	log.Printf("[cfg] gateway %s from %s", map[bool]string{true: "enabled", false: "disabled"}[now], from)
+	closeActive()
+	signalWake()
+	return now
 }
 
 // ---- identity (persisted) ----
@@ -598,17 +610,17 @@ func (m *modem) drain(quietMs, maxMs int) int {
 
 // stripUnsolicited drops the modem's own notifications (^DSFLOWRPT data
 // counters, ^RSSI, ^HCSQ, ^HFREQINFO and the rest). The radio emits them
-// whenever it likes, including in the middle of a response, and every command
-// this gateway sends is a plain AT or +CMD, so nothing it waits for starts
-// with ^.
-func stripUnsolicited(s string) string {
+// whenever it likes, including in the middle of a response. Sending a ^ command
+// of our own is the exception, so its answer is named in tag and survives.
+func stripUnsolicited(s, tag string) string {
 	if !strings.Contains(s, "^") {
 		return s
 	}
 	lines := strings.Split(s, "\n")
 	keep := lines[:0]
 	for _, ln := range lines {
-		if strings.HasPrefix(strings.TrimSpace(ln), "^") {
+		t := strings.TrimSpace(ln)
+		if strings.HasPrefix(t, "^") && (tag == "" || !strings.HasPrefix(t, tag)) {
 			continue
 		}
 		keep = append(keep, ln)
@@ -616,16 +628,30 @@ func stripUnsolicited(s string) string {
 	return strings.Join(keep, "\n")
 }
 
-func (m *modem) readUntil(mark int, pred func(string) bool, timeoutMs int) (string, error) {
+// replyTag is what a command's own answer looks like, for the ^ commands whose
+// answer would otherwise be mistaken for chatter: AT^DSFLOWQRY -> ^DSFLOWQRY:.
+func replyTag(cmd string) string {
+	i := strings.Index(cmd, "^")
+	if i < 0 {
+		return ""
+	}
+	t := cmd[i:]
+	if j := strings.IndexAny(t, "=?"); j >= 0 {
+		t = t[:j]
+	}
+	return t + ":"
+}
+
+func (m *modem) readUntil(mark int, pred func(string) bool, timeoutMs int, tag string) (string, error) {
 	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
 	for time.Now().Before(deadline) {
-		s := stripUnsolicited(m.since(mark))
+		s := stripUnsolicited(m.since(mark), tag)
 		if pred(s) {
 			return s, nil
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return stripUnsolicited(m.since(mark)), fmt.Errorf("timeout waiting for modem response")
+	return stripUnsolicited(m.since(mark), tag), fmt.Errorf("timeout waiting for modem response")
 }
 
 // hasTerminator ends the wait for a plain command (AT, AT+CMGF). +CMS ERROR is
@@ -646,7 +672,7 @@ func (m *modem) sendCommand(cmd string, timeoutMs int) (string, error) {
 	if err := m.write(cmd + "\r"); err != nil {
 		return "", err
 	}
-	b, err := m.readUntil(mk, hasTerminator, timeoutMs)
+	b, err := m.readUntil(mk, hasTerminator, timeoutMs, replyTag(cmd))
 	if err != nil {
 		return b, err
 	}
@@ -734,7 +760,7 @@ func (m *modem) sendPduOnce(pduHex string, tpduLength *int) (string, error) {
 	if err := m.write("AT+CMGS=" + strconv.Itoa(length) + "\r"); err != nil {
 		return "", err
 	}
-	pb, err := m.readUntil(mk, func(b string) bool { return strings.Contains(b, ">") || strings.Contains(b, "ERROR") }, cmdTOms)
+	pb, err := m.readUntil(mk, func(b string) bool { return strings.Contains(b, ">") || strings.Contains(b, "ERROR") }, cmdTOms, "")
 	if err != nil || !strings.Contains(pb, ">") {
 		return pb, fmt.Errorf("no '>' prompt for AT+CMGS: %s", strings.TrimSpace(pb))
 	}
@@ -742,7 +768,7 @@ func (m *modem) sendPduOnce(pduHex string, tpduLength *int) (string, error) {
 	if err := m.write(clean + "\x1a"); err != nil {
 		return "", err
 	}
-	b, err := m.readUntil(mk, hasCmgsResult, cmgsTOms)
+	b, err := m.readUntil(mk, hasCmgsResult, cmgsTOms, "")
 	if err != nil {
 		return b, err
 	}
@@ -777,7 +803,7 @@ func (m *modem) sendTextOnce(phone, text string) (string, error) {
 	if err := m.write("AT+CMGS=\"" + phone + "\"\r"); err != nil {
 		return "", err
 	}
-	pb, err := m.readUntil(mk, func(b string) bool { return strings.Contains(b, ">") || strings.Contains(b, "ERROR") }, cmdTOms)
+	pb, err := m.readUntil(mk, func(b string) bool { return strings.Contains(b, ">") || strings.Contains(b, "ERROR") }, cmdTOms, "")
 	if err != nil || !strings.Contains(pb, ">") {
 		return pb, fmt.Errorf("no '>' prompt: %s", strings.TrimSpace(pb))
 	}
@@ -785,7 +811,7 @@ func (m *modem) sendTextOnce(phone, text string) (string, error) {
 	if err := m.write(text + "\x1a"); err != nil {
 		return "", err
 	}
-	b, err := m.readUntil(mk, hasCmgsResult, cmgsTOms)
+	b, err := m.readUntil(mk, hasCmgsResult, cmgsTOms, "")
 	if err != nil {
 		return b, err
 	}
@@ -886,6 +912,11 @@ func main() {
 
 	startHTTP(env("OCW_HTTP_ADDR", ":8080"))
 
+	// The front panel, when the modem has one and it is not switched off.
+	if env("OCW_SCREEN", "1") != "0" {
+		go screenLoop()
+	}
+
 	// Independent of the modem and the websocket on purpose: it reports on them,
 	// so it has to keep running when they are broken.
 	go beatLoop()
@@ -902,6 +933,7 @@ func main() {
 		log.Printf("waiting for %s: %v", appvcomDev, err)
 		time.Sleep(5 * time.Second)
 	}
+	atModem.Store(m) // the screen reads +CSQ through it
 
 	// Keep the modem AT status current so the page reflects reality and recovers on
 	// its own if a check happens to time out.

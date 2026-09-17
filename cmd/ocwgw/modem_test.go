@@ -35,23 +35,32 @@ func TestStripUnsolicited(t *testing.T) {
 	cases := []struct {
 		name string
 		in   string
+		tag  string
 		want string
 	}{
-		{"nothing to strip", "\r\nOK\r\n", "\r\nOK\r\n"},
+		{"nothing to strip", "\r\nOK\r\n", "", "\r\nOK\r\n"},
 		{
 			"dsflowrpt around the terminator",
 			"\r\n^DSFLOWRPT:00026F12,00000000,00000000\r\n\r\nOK\r\n",
+			"",
 			"\r\n\r\nOK\r\n",
 		},
 		{
 			"signal reports mixed into a response",
 			"\r\n^RSSI:20\r\n\r\n+CSCA: \"+3546999099\",145\r\n\r\n^HCSQ:\"LTE\",48,44\r\n\r\nOK\r\n",
+			"",
 			"\r\n\r\n+CSCA: \"+3546999099\",145\r\n\r\n\r\nOK\r\n",
+		},
+		{
+			"the answer to our own ^ command stays",
+			"\r\n^DSFLOWRPT:0001,0,0\r\n\r\n^DSFLOWQRY:001A,0D49,2BE3\r\n\r\nOK\r\n",
+			"^DSFLOWQRY:",
+			"\r\n\r\n^DSFLOWQRY:001A,0D49,2BE3\r\n\r\nOK\r\n",
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := stripUnsolicited(c.in); got != c.want {
+			if got := stripUnsolicited(c.in, c.tag); got != c.want {
 				t.Errorf("stripUnsolicited(%q)\n got %q\nwant %q", c.in, got, c.want)
 			}
 		})
@@ -60,7 +69,7 @@ func TestStripUnsolicited(t *testing.T) {
 
 // A response is still recognised when the radio interleaves its own chatter.
 func TestTerminatorSurvivesUnsolicited(t *testing.T) {
-	noisy := stripUnsolicited("\r\n^DSFLOWRPT:0001,0,0\r\n\r\nOK\r\n")
+	noisy := stripUnsolicited("\r\n^DSFLOWRPT:0001,0,0\r\n\r\nOK\r\n", "")
 	if !hasTerminator(noisy) {
 		t.Fatalf("terminator lost after stripping: %q", noisy)
 	}

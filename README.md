@@ -8,8 +8,8 @@ PC once and then it runs on the modem on its own, with nothing else needed to ke
 
 It opens the modem's second AT channel (`/dev/appvcom1`), connects to the opencarwings
 websocket over the modem's own cellular data, decrypts the commands the server sends, and
-sends the SMS (PDU or text) out through the modem. There is a small status and config web
-page too.
+sends the SMS (PDU or text) out through the modem. It draws its own screen on the modem's
+colour front panel, and serves a status and config web page.
 
 This is a Go port of [developerfromjokela/opencarwings-sms](https://github.com/developerfromjokela/opencarwings-sms).
 The protocol and the AT flow come from that project's Java client.
@@ -88,9 +88,9 @@ http://192.168.8.1:8080/
 
 <img src="assets/status-page.png" alt="ocwgw status page" width="480">
 
-It shows the values to register, the websocket state, whether the modem AT channel is
-answering, the sent and error counts, the last event and last send, uptime, and when the
-heartbeat last went out. Four things you can change there:
+It shows a shot of the modem's panel, the values to register, the websocket state, whether
+the modem AT channel is answering, the sent and error counts, the last event and last send,
+uptime, and when the heartbeat last went out. Four things you can change there:
 
 * the Server URL, handy for pointing at your own server
 * the Heartbeat URL, and how often it fires
@@ -99,6 +99,57 @@ heartbeat last went out. Four things you can change there:
 
 The first three are saved and take effect right away. There is a `/status.json` endpoint
 too.
+
+## The screen
+
+The MiFi's front panel becomes the gateway's standby screen. Wake it with either button and
+this is what you get:
+
+<img src="assets/screen.png" alt="the gateway's standby screen" width="256">
+
+The panel turned out to be a colour one. Everything the stock UI draws is white on black,
+and the firmware process driving it is called `oled`, so it reads as monochrome; painting
+test bars straight at the framebuffer showed otherwise. It is 128x128 at 16 bits per pixel
+behind `stlcd_tft_fb`, a TFT LCD with its own backlight, and it takes its pixels
+big-endian. That is why the logo is drawn in its own blues. The text stays white, which is
+easier to read at this size.
+
+The top row is the modem's own status icons, drawn where the stock UI draws them: signal,
+radio type, wifi with the number of clients on it, unread messages, battery. They are the
+firmware's own bitmaps, read from its `icon.xml` at startup, not redrawn copies. Under the
+logo is the gateway itself: `ONLINE`, `NO LINK`, `CONNECTING`, `STOPPED`, `NOT REGD` or
+`NO MODEM`, the data this session has used, and the sent and error counts.
+
+Each number comes from wherever the modem already keeps it: `AT+CSQ`, `AT^SYSINFOEX` and
+`AT^DSFLOWQRY` on the AT channel the gateway already holds, the battery from
+`/sys/class/power_supply`, the wifi clients from `/var/ap*_stainfo`, the unread count from
+the firmware's web API.
+
+The standby screen is the gateway's. The menu is still Huawei's:
+
+* **Menu** hands the panel back to the stock UI. Its menu, SMS list, data pages and QR codes
+  work the way they always did. The gateway takes the panel back 25 seconds after the last
+  press.
+* **Power**, while the screen is lit, asks whether to stop or start the gateway. Power
+  answers yes, menu answers no. That is how you stop and start it with no phone and no PC.
+
+The backlight comes on for 20 seconds per press, then goes out. Dark, the screen costs
+nothing: no drawing, no AT queries. Lit and idle costs nothing either, because a frame that
+would look the same as the one already on the panel is not drawn.
+
+`/screen.png` serves a shot of the panel, drawn on request, and the status page shows it:
+
+```
+scripts/screenshot.sh 192.168.8.1:8080 panel.png
+```
+
+Start with `OCW_SCREEN=0` to leave the stock screen alone.
+
+Two things to know. The gateway pauses the stock `oled` process while it holds the panel and
+starts it again on the way out; `kill -9` is the one exit that skips that, and it leaves the
+panel frozen on its last frame until the gateway runs again. And the icons come from the
+file this firmware ships, so a modem that lays them out differently gets its own layout, or
+plain bars and a battery box if the file is not there at all.
 
 ## Autostart
 
